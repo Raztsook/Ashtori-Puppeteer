@@ -1,12 +1,30 @@
+// index.js
 const express = require("express");
 const puppeteer = require("puppeteer");
+const axios = require("axios");
+
+const AIRTABLE_TOKEN = process.env.AIRTABLE_TOKEN;
+const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
+const AIRTABLE_TABLE_NAME = "tokens";
 
 const app = express();
 
 app.get("/", async (req, res) => {
   const url = req.query.url || "https://app--training-space-e7c9cafa.base44.app";
 
+  if (!AIRTABLE_TOKEN || !AIRTABLE_BASE_ID) {
+    return res.status(500).send("❌ Missing environment variables");
+  }
+
   try {
+    // Fetch token from Airtable
+    const airtableUrl = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${AIRTABLE_TABLE_NAME}?maxRecords=1&sort[0][field]=created&sort[0][direction]=desc`;
+    const response = await axios.get(airtableUrl, {
+      headers: { Authorization: `Bearer ${AIRTABLE_TOKEN}` }
+    });
+    const token = response.data.records?.[0]?.fields?.token;
+    if (!token) return res.status(400).send("❌ No token found in Airtable");
+
     const browser = await puppeteer.launch({
       headless: 'new',
       args: [
@@ -21,49 +39,43 @@ app.get("/", async (req, res) => {
 
     const page = await browser.newPage();
 
-    await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
+    // Inject token into localStorage before scripts load
+    await page.evaluateOnNewDocument((tk, origin) => {
+      if (location.origin === origin) {
+        localStorage.setItem("token", tk);
+      }
+    }, token, new URL(url).origin);
 
-    const token = await page.evaluate(() => {
-      return localStorage.getItem("token");
-    });
+    // Load site
+    await page.goto(url, { waitUntil: "networkidle2" });
 
-    if (!token) {
-      await browser.close();
-      return res.status(400).send("No token found in localStorage");
-    }
+    // Reload to ensure React picks up token
+    await page.reload({ waitUntil: "networkidle2" });
 
-    const page2 = await browser.newPage();
-    await page2.goto("about:blank");
-    await page2.evaluate((tk) => {
-      localStorage.setItem("token", tk);
-    }, token);
-
-    await page2.goto(url, { waitUntil: "networkidle2" });
-
-    let foundText = false;
-    const maxWaitTimeMs = 3 * 60 * 1000;
-    const intervalMs = 1000;
+    // Wait for indication of webhook being sent
+    const maxWait = 180000; // 3 minutes
     const start = Date.now();
+    let webhookSent = false;
 
-    while (Date.now() - start < maxWaitTimeMs) {
-      const text = await page2.evaluate(() => document.body.innerText);
-      if (text.includes("Monthly summaries sent")) {
-        foundText = true;
+    while (Date.now() - start < maxWait) {
+      const bodyText = await page.evaluate(() => document.body.innerText);
+      if (bodyText.includes("Monthly summaries sent")) {
+        webhookSent = true;
         break;
       }
-      await page2.mouse.move(100 + Math.random() * 50, 200 + Math.random() * 50);
-      await page2.evaluate(() => window.scrollBy(0, 20));
-      await new Promise(resolve => setTimeout(resolve, intervalMs));
+      await page.mouse.move(100 + Math.random() * 50, 200 + Math.random() * 50);
+      await page.evaluate(() => window.scrollBy(0, 20));
+      await page.waitForTimeout(1000);
     }
 
     await browser.close();
-    res.status(200).json({ webhookConfirmed: foundText });
 
+    res.status(200).json({ webhookConfirmed: webhookSent });
   } catch (err) {
-    console.error(err);
-    res.status(500).send("Error running browser: " + err.message);
+    console.error("❌ Error:", err.message);
+    res.status(500).send("Error: " + err.message);
   }
 });
 
 const port = process.env.PORT || 8080;
-app.listen(port, () => console.log("Listening on port", port));
+app.listen(port, () => console.log("✅ Server is running on port", port));

@@ -1,25 +1,14 @@
 
 const express = require("express");
 const puppeteer = require("puppeteer");
-const axios = require("axios");
-
-const AIRTABLE_TOKEN = process.env.AIRTABLE_TOKEN;
-const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
-const AIRTABLE_TABLE_NAME = "tokens";
 
 const app = express();
 
 app.get("/", async (req, res) => {
   const url = req.query.url || "https://app--training-space-e7c9cafa.base44.app";
 
-  console.log("🚀 Starting Puppeteer token fetch flow");
-  console.log("🌍 Target URL:", url);
-  console.log("🔐 Airtable Token Present:", !!AIRTABLE_TOKEN);
-  console.log("🔐 Airtable Base ID:", AIRTABLE_BASE_ID);
-
-  if (!AIRTABLE_TOKEN || !AIRTABLE_BASE_ID) {
-    return res.status(500).send("❌ Missing AIRTABLE_TOKEN or AIRTABLE_BASE_ID");
-  }
+  console.log("🚀 Launching Puppeteer");
+  console.log("🌍 Navigating to:", url);
 
   try {
     const browser = await puppeteer.launch({
@@ -36,46 +25,43 @@ app.get("/", async (req, res) => {
 
     const page = await browser.newPage();
 
-    console.log("🌐 Navigating to site...");
     await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
 
-    // Wait a bit for the site to initialize any JS-based tokens
+    // Allow time for page scripts to run
     await new Promise(resolve => setTimeout(resolve, 5000));
 
-    console.log("🔍 Trying to extract token from localStorage...");
+    // Try extracting token just for debug/logging
     const token = await page.evaluate(() => {
       try {
         return localStorage.getItem("token");
-      } catch (err) {
+      } catch (e) {
         return null;
       }
     });
 
-    console.log("📦 Token retrieved:", token ? token.slice(0, 10) + "..." : "❌ Not found");
+    console.log("🧠 Token in localStorage:", token ? token.slice(0, 10) + "..." : "❌ Not found");
 
-    if (!token) {
-      await browser.close();
-      return res.status(400).send("❌ Token not found in localStorage.");
+    // Try detecting whether webhook was triggered
+    let webhookConfirmed = false;
+    const start = Date.now();
+    const maxWait = 180000; // 3 minutes
+
+    while (Date.now() - start < maxWait) {
+      const bodyText = await page.evaluate(() => document.body.innerText);
+      if (bodyText.includes("Monthly summaries sent")) {
+        webhookConfirmed = true;
+        break;
+      }
+
+      await page.mouse.move(100 + Math.random() * 50, 200 + Math.random() * 50);
+      await page.evaluate(() => window.scrollBy(0, 20));
+      await new Promise(resolve => setTimeout(resolve, 1000));
     }
 
-    // Send token to Airtable
-    const airtableUrl = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${AIRTABLE_TABLE_NAME}`;
-    const airtableResponse = await axios.post(airtableUrl, {
-      fields: {
-        token: token,
-        created: new Date().toISOString()
-      }
-    }, {
-      headers: {
-        Authorization: `Bearer ${AIRTABLE_TOKEN}`,
-        "Content-Type": "application/json"
-      }
-    });
-
-    console.log("✅ Token sent to Airtable with record ID:", airtableResponse.data.id);
-
     await browser.close();
-    res.status(200).json({ tokenStored: true, airtableRecordId: airtableResponse.data.id });
+
+    console.log("✅ webhookConfirmed:", webhookConfirmed);
+    res.status(200).json({ webhookConfirmed });
 
   } catch (err) {
     console.error("🔥 Error occurred:", err.message);

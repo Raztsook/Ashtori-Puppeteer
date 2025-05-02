@@ -1,4 +1,4 @@
-// index.js
+
 const express = require("express");
 const puppeteer = require("puppeteer");
 const axios = require("axios");
@@ -12,72 +12,76 @@ const app = express();
 app.get("/", async (req, res) => {
   const url = req.query.url || "https://app--training-space-e7c9cafa.base44.app";
 
+  console.log("🚀 Starting Puppeteer token fetch flow");
+  console.log("🌍 Target URL:", url);
+  console.log("🔐 Airtable Token Present:", !!AIRTABLE_TOKEN);
+  console.log("🔐 Airtable Base ID:", AIRTABLE_BASE_ID);
+
   if (!AIRTABLE_TOKEN || !AIRTABLE_BASE_ID) {
-    return res.status(500).send("❌ Missing environment variables");
+    return res.status(500).send("❌ Missing AIRTABLE_TOKEN or AIRTABLE_BASE_ID");
   }
 
   try {
-    // Fetch token from Airtable
-    const airtableUrl = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${AIRTABLE_TABLE_NAME}?maxRecords=1&sort[0][field]=created&sort[0][direction]=desc`;
-    const response = await axios.get(airtableUrl, {
-      headers: { Authorization: `Bearer ${AIRTABLE_TOKEN}` }
-    });
-    const token = response.data.records?.[0]?.fields?.token;
-    if (!token) return res.status(400).send("❌ No token found in Airtable");
-
     const browser = await puppeteer.launch({
-      headless: 'new',
+      headless: "new",
       args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--single-process',
-        '--no-zygote'
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--single-process",
+        "--no-zygote"
       ]
     });
 
     const page = await browser.newPage();
 
-    // Inject token into localStorage before scripts load
-    await page.evaluateOnNewDocument((tk, origin) => {
-      if (location.origin === origin) {
-        localStorage.setItem("token", tk);
+    console.log("🌐 Navigating to site...");
+    await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
+
+    // Wait a bit for the site to initialize any JS-based tokens
+    await new Promise(resolve => setTimeout(resolve, 5000));
+
+    console.log("🔍 Trying to extract token from localStorage...");
+    const token = await page.evaluate(() => {
+      try {
+        return localStorage.getItem("token");
+      } catch (err) {
+        return null;
       }
-    }, token, new URL(url).origin);
+    });
 
-    // Load site
-    await page.goto(url, { waitUntil: "networkidle2" });
+    console.log("📦 Token retrieved:", token ? token.slice(0, 10) + "..." : "❌ Not found");
 
-    // Reload to ensure React picks up token
-    await page.reload({ waitUntil: "networkidle2" });
-
-    // Wait for indication of webhook being sent
-    const maxWait = 180000; // 3 minutes
-    const start = Date.now();
-    let webhookSent = false;
-
-    while (Date.now() - start < maxWait) {
-      const bodyText = await page.evaluate(() => document.body.innerText);
-      if (bodyText.includes("Monthly summaries sent")) {
-        webhookSent = true;
-        break;
-      }
-    
-      await page.mouse.move(100 + Math.random() * 50, 200 + Math.random() * 50);
-      await page.evaluate(() => window.scrollBy(0, 20));
-      await new Promise(resolve => setTimeout(resolve, 1000));
+    if (!token) {
+      await browser.close();
+      return res.status(400).send("❌ Token not found in localStorage.");
     }
-    
+
+    // Send token to Airtable
+    const airtableUrl = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${AIRTABLE_TABLE_NAME}`;
+    const airtableResponse = await axios.post(airtableUrl, {
+      fields: {
+        token: token,
+        created: new Date().toISOString()
+      }
+    }, {
+      headers: {
+        Authorization: `Bearer ${AIRTABLE_TOKEN}`,
+        "Content-Type": "application/json"
+      }
+    });
+
+    console.log("✅ Token sent to Airtable with record ID:", airtableResponse.data.id);
 
     await browser.close();
+    res.status(200).json({ tokenStored: true, airtableRecordId: airtableResponse.data.id });
 
-    res.status(200).json({ webhookConfirmed: webhookSent });
   } catch (err) {
-    console.error("❌ Error:", err.message);
-    res.status(500).send("Error: " + err.message);
+    console.error("🔥 Error occurred:", err.message);
+    res.status(500).send("🔥 Error: " + err.message);
   }
 });
 
 const port = process.env.PORT || 8080;
-app.listen(port, () => console.log("✅ Server is running on port", port));
+app.listen(port, () => console.log("✅ Server running on port", port));

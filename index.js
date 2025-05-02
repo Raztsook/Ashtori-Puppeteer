@@ -63,10 +63,12 @@ app.get("/", async (req, res) => {
         webhookSent = true;
         break;
       }
+    
       await page.mouse.move(100 + Math.random() * 50, 200 + Math.random() * 50);
       await page.evaluate(() => window.scrollBy(0, 20));
-      await page.waitForTimeout(1000);
+      await new Promise(resolve => setTimeout(resolve, 1000));
     }
+    
 
     await browser.close();
 
